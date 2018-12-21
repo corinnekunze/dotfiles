@@ -1,0 +1,189 @@
+muxable_paths=($SOURCE_DIR/gs)
+cdpath=("${muxable_paths[@]}" "." "~" "${SOURCE_DIR}")
+
+mux() {
+  local name cols
+  if [ -n "$1" ]; then
+    cd $1
+  fi
+  name="$(basename ${PWD} | sed -e 's/\./-/g')"
+  cols="$(tput cols)"
+  if ! $(tmux has-session -t ${name} &>/dev/null); then
+    tmux new-session -d -n code -s ${name} -x${cols-150} -y50 \; \
+      new-window -a -d -n server -t ${name}:1 \; \
+      new-window -a -d -n tests -t ${name}:2 \; \
+      split-window -h -t ${name}:2 \; \
+      select-layout -t ${name} tiled &>/dev/null
+  fi
+  tmux attach-session -t ${name}
+}
+
+mate() {
+  local name cols
+  if [ -n "$1" ]; then
+    cd $1
+  fi
+  name="TMATE-$(basename $PWD | sed -e 's/\./-/g')"
+  cols="$(tput cols)"
+  tmate_cmd="/usr/local/bin/tmate"
+  if ! $(${tmate_cmd} -S /tmp/${name}.sock has-session -t $name &>/dev/null); then
+    ${tmate_cmd} -S /tmp/${name}.sock new-session -d -n code -s ${name} -x${cols-150} -y50 \; \
+      new-window -a -d -n server -t ${name}:1 \; \
+      new-window -d -n tests -t ${name}:2 \; \
+      split-window -h -t ${name}:2 \; \
+      select-layout -t ${name} tiled &>/dev/null
+  fi
+  ${tmate_cmd} -S /tmp/${name}.sock attach-session -t ${name}
+}
+
+compctl -/ -S '' -W "(${SOURCE_DIR} ${muxable_paths[*]})" mate
+compctl -/ -S '' -W "(${SOURCE_DIR} ${muxable_paths[*]})" mux
+
+clone() {
+  local url basename example new org_source_dir org service
+
+  ORG="$1"
+  case $1 in
+    'gs')
+      org_source_dir="${SOURCE_DIR}/gs"
+      org="goldstar"
+      service="github.com"
+      ;;
+  esac
+
+  if [ ! -d "${org_source_dir}" ]; then
+    echo "Directory ${org_source_dir} does not exist."
+    echo "Creating ${org_source_dir}"
+  fi
+  shift
+
+  basename="`basename $1 .git`"
+  echo "${org_source_dir}/${basename}"
+  if [ ! -d "${org_source_dir}/${basename}" ]; then
+    new=1
+    case "$1" in
+      *:*) url="$1" ;;
+      */*) url="git@${service}:$1.git" ;;
+      *)   url="git@${service}:${org}/$1.git" ;;
+    esac
+    git clone "${url}" "${org_source_dir}/${basename}"
+    cd "${org_source_dir}/${basename}"
+    if [ -d "${org_source_dir}/${basename}/config" ]; then
+      for example in "${org_source_dir}/${basename}"/config/*.example.yml; do
+        cp "$example" "${example%.example.yml}.yml"
+      done 2>/dev/null
+    fi
+  fi
+  cd "${org_source_dir}/${basename}"
+  ln -sf ../bin .git
+  mkdir -p .git/safe
+  if [ ! -f .git/hooks/post-rewrite ]; then
+    cat > .git/hooks/post-rewrite <<EOS
+#!/bin/sh
+
+GIT_DIR="\$(dirname "\$(dirname "\$0")")"
+export GIT_DIR
+
+case "\$1" in
+  rebase) exec "\$GIT_DIR/hooks/post-merge" 0 rebase ;;
+esac
+EOS
+  fi
+  if [ ! -f .git/hooks/pre-commit ]; then
+    echo '#!/bin/sh' > .git/hooks/pre-commit
+    echo 'git diff --exit-code --cached -- Gemfile Gemfile.lock >/dev/null || bundle check' >> .git/hooks/pre-commit
+  fi
+  if [ ! -f .git/hooks/ctags ]; then
+    echo '#!/bin/sh' > .git/hooks/ctags
+    echo 'rm -f .git/tags' >> .git/hooks/ctags
+    echo 'ctags --tag-relative -f .git/tags --exclude=.git --exclude=db --exclude=public/uploads --exclude=vendor --exclude=tmp --languages=-javascript,html,sql -R' >> .git/hooks/ctags
+    chmod +x .git/hooks/ctags
+    for basename in post-checkout post-commit post-merge; do
+      echo '#!/bin/sh' > .git/hooks/$basename
+      echo '$GIT_DIR/hooks/ctags >/dev/null 2>&1 &' >> .git/hooks/$basename
+      chmod +x .git/hooks/$basename
+    done
+    .git/hooks/ctags
+  fi
+  echo 'if command -v hookup >/dev/null; then' >> .git/hooks/post-checkout
+  echo '  hookup post-checkout "$@"' >> .git/hooks/post-checkout
+  echo "fi" >> .git/hooks/post-checkout
+  if [ -n "$new" -a -x script/setup ]; then
+    script/setup
+  elif [ -n "$new" -a -x bin/setup ]; then
+    bin/setup
+  fi
+}
+
+export TMPDIR=~/tmp
+
+# Docker cleanup shortcuts
+function docker-clean-exited() {
+  if [[ $(docker ps -a -q -f status=exited | wc -l) -eq 0 ]]; then
+    echo 'Exited docker containers are already clean.  :)'
+  else
+    docker rm -v $(docker ps -a -q -f status=exited)
+  fi
+}
+function docker-clean-images() {
+  if [[ $(docker images -f "dangling=true" | wc -l) -eq 0 ]]; then
+    echo 'Dangling docker images are already clean.  :)'
+  else
+    docker rmi $(docker images -f "dangling=true" -q)
+  fi
+}
+
+alias dc="$(which docker-compose)"
+
+function dcrun() {
+  docker_cmd="$(which docker-compose)"
+  container_name="$1"
+  shift
+  ${docker_cmd} run ${container_name} bash -c -l "$*"
+}
+
+function dbe() {
+  dcrun web "bundle exec $*"
+}
+
+# Load NVM
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+
+
+# Key Bindings
+autoload -U up-line-or-beginning-search
+autoload -U down-line-or-beginning-search
+zle -N up-line-or-beginning-search
+zle -N down-line-or-beginning-search
+bindkey "^[[A" up-line-or-beginning-search # Up
+bindkey "^[[B" down-line-or-beginning-search # Down
+
+# Aliases
+alias gclone='clone gs'
+alias docker-clean='docker-clean-exited; docker-clean-images'
+alias bp="bundle package --all --no-install"
+alias dcu="docker-compose up"
+alias dcd="docker-compose down"
+alias rake='noglob bundle exec rake'
+
+# Custom Aliases
+alias gck="git checkout"
+alias subl="/Applications/Sublime\ Text.app/Contents/SharedSupport/bin/subl"
+alias vscode="/Applications/Visual\ Studio\ Code.app/Contents/Resources/app/bin/code"
+alias bi="bundle install"
+alias biv="bundle install --path vendor"
+alias mmv='noglob zmv -W'
+alias cppcompile='c++ -std=c++11 -stdlib=libc++'
+
+export HOST_IP=$(ipconfig getifaddr en0)
+
+if [[ $TERM_PROGRAM == "iTerm.app" ]]; then
+  test -e "${HOME}/.iterm2_shell_integration.zsh" && source "${HOME}/.iterm2_shell_integration.zsh"
+fi
+
+ssh-add -A 2>/dev/null
+
+source /usr/local/share/chruby/chruby.sh
+
